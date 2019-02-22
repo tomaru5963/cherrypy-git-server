@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+
+import http.client
+import io
+import os.path
+import re
+import subprocess
+import sys
+
+import cherrypy
+from cherrypy.lib.auth_digest import digest_auth, get_ha1_dict_plain
+from cherrypy.process.plugins import Daemonizer, PIDFile
+
+
+valid_users = {'foo': 'bar'}
+GIT_PROJECT_ROOT = os.path.expanduser('~/git')
+
+GITWEB_CONF_PATH = os.path.expanduser('~/git/gitweb.conf')
+GITWEB_CGI_PATH = '/usr/share/gitweb/gitweb.cgi'
+# GITWEB_STATIC_PATH = '/usr/share/gitweb/static'
+GITWEB_STATIC_PATH = os.path.expanduser('~/git/static')
+
+GIT_HTTP_BACKEND_CGI_PATH = '/usr/lib/git-core/git-http-backend'
+
+PID_FILE_PATH = os.path.expanduser('~/var/run/git-server.pid')
+ACCESS_LOG_PATH = os.path.expanduser('~/var/log/git-server/access.log')
+ERROR_LOG_PATH = os.path.expanduser('~/var/log/git-server/error.log')
+
+
+SMART_HTTP_PAT = re.compile(r"""
+    ^(.*/(HEAD |
+          info/refs |
+          objects/(info/[^/]+ |
+                   [0-9a-f]{2}/[0-9a-f]{38} |
+                   pack/pack-[0-9a-f]{40}\.(pack|idx)) |
+          git-(upload|receive)-pack))$
+""", re.VERBOSE)
+
+
+class FakeSocket(object):
+
+    def __init__(self, response):
+        status, sep, rest = response.partition(b'\r\n')
+        if status.startswith(b'Status:'):
+            self.response = response.replace(b'Status:', b'HTTP/1.1', 1)
+        else:
+            self.response = b'HTTP/1.1 200 OK\r\n' + rest
+
+    def makefile(self, *args, **kwargs):
+        return io.BytesIO(self.response)
+
+
+class StaticContents(object):
+    pass
+
+
+get_ha1 = get_ha1_dict_plain(valid_users)
+
+
+@cherrypy.tools.register('before_handler')
+def check_auth():
+    if (cherrypy.request.params.get('service', '') == 'git-receive-pack' or
+            cherrypy.request.path_info.endswith('/git-receive-pack')):
+        digest_auth('Git Access', get_ha1, '5d41402abc4b2a76b9719d911017c592')
+
+
+class GitServer(object):
+
+    @cherrypy.expose
+    @cherrypy.tools.check_auth()
+    def default(self, *args, **kwargs):
+        cgi_env = {}
+        for k, v in cherrypy.request.wsgi_environ.items():
+            if isinstance(v, str):
+                cgi_env[k] = v
+        cgi_env['GATEWAY_INTERFACE'] = 'CGI/1.1'
+        cgi_env['GIT_PROJECT_ROOT'] = GIT_PROJECT_ROOT
+        cgi_env['GITWEB_CONFIG'] = GITWEB_CONF_PATH
+        cgi_env['GIT_HTTP_EXPORT_ALL'] = ''
+
+        if re.match(SMART_HTTP_PAT, cgi_env['PATH_INFO']):
+            cgi_script = GIT_HTTP_BACKEND_CGI_PATH
+            user_id = cherrypy.request.login
+            cherrypy.log('GIT_HTTP_BACKEND Invoked by ' + str(user_id))
+
+            if user_id:
+                cgi_env['REMOTE_USER'] = user_id
+        else:
+            cgi_script = GITWEB_CGI_PATH
+
+        p = subprocess.Popen([cgi_script],
+                             stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE,
+                             env=cgi_env)
+        if cherrypy.request.method == 'POST':
+            p.stdin.write(cherrypy.request.body.read())
+        p.stdin.close()
+        response = http.client.HTTPResponse(FakeSocket(p.stdout.read()))
+        p.stdout.close()
+        p.wait()
+
+        response.begin()
+        cherrypy.response.status = response.status
+        cherrypy.response.headers.update(response.getheaders())
+        return response.read()
+
+
+if __name__ == '__main__':
+    if os.path.exists(PID_FILE_PATH):
+        sys.exit(1)
+
+    static_contents_conf = {
+        '/static': {
+            'tools.staticdir.on': True,
+            'tools.staticdir.dir': GITWEB_STATIC_PATH,
+        },
+    }
+
+    git_server_conf = {
+        'global': {
+            'server.socket_host': '0.0.0.0',
+            'log.access_file': ACCESS_LOG_PATH,
+            'log.error_file': ERROR_LOG_PATH,
+        },
+    }
+
+    Daemonizer(cherrypy.engine).subscribe()
+    PIDFile(cherrypy.engine, PID_FILE_PATH).subscribe()
+
+    cherrypy.tree.mount(StaticContents(), '/', static_contents_conf)
+    cherrypy.quickstart(GitServer(), '/git', git_server_conf)
