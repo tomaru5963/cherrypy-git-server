@@ -50,10 +50,6 @@ class FakeSocket(object):
         return io.BytesIO(self.response)
 
 
-class StaticContents(object):
-    pass
-
-
 get_ha1 = get_ha1_dict_plain(valid_users)
 
 
@@ -64,7 +60,7 @@ def check_auth():
         digest_auth('Git Access', get_ha1, '5d41402abc4b2a76b9719d911017c592')
 
 
-class GitServer(object):
+class Git(object):
 
     @cherrypy.expose
     @cherrypy.tools.check_auth()
@@ -109,6 +105,13 @@ if __name__ == '__main__':
     if os.path.exists(PID_FILE_PATH):
         sys.exit(1)
 
+    server_conf = {
+        'environment': 'production',
+        'server.socket_host': '0.0.0.0',
+        'log.access_file': ACCESS_LOG_PATH,
+        'log.error_file': ERROR_LOG_PATH,
+    }
+
     static_contents_conf = {
         '/static': {
             'tools.staticdir.on': True,
@@ -116,16 +119,11 @@ if __name__ == '__main__':
         },
     }
 
-    git_server_conf = {
-        'global': {
-            'server.socket_host': '0.0.0.0',
-            'log.access_file': ACCESS_LOG_PATH,
-            'log.error_file': ERROR_LOG_PATH,
-        },
-    }
-
     Daemonizer(cherrypy.engine).subscribe()
     PIDFile(cherrypy.engine, PID_FILE_PATH).subscribe()
 
-    cherrypy.tree.mount(StaticContents(), '/', static_contents_conf)
-    cherrypy.quickstart(GitServer(), '/git', git_server_conf)
+    cherrypy.config.update(server_conf)
+    cherrypy.tree.mount(None, '/', static_contents_conf)
+    cherrypy.tree.mount(Git(), '/git')
+    cherrypy.engine.start()
+    cherrypy.engine.block()
