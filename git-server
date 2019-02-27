@@ -12,7 +12,17 @@ from cherrypy.lib.auth_digest import digest_auth, get_ha1_dict_plain
 from cherrypy.process.plugins import Daemonizer, PIDFile
 
 
-valid_users = {'foo': 'bar'}
+accounts = {
+    'foo': {
+        'password': 'bar',
+        'projects': ('/test.git',),
+    },
+    'hoge': {
+        'password': 'fuga',
+        'projects': ('*',),
+    },
+}
+
 GIT_PROJECT_ROOT = os.path.expanduser('~/git')
 
 GITWEB_CONF_PATH = os.path.expanduser('~/git/gitweb.conf')
@@ -50,13 +60,23 @@ class FakeSocket(object):
         return io.BytesIO(self.response)
 
 
-get_ha1 = get_ha1_dict_plain(valid_users)
-
-
 @cherrypy.tools.register('before_handler')
 def check_auth():
     if (cherrypy.request.params.get('service', '') == 'git-receive-pack' or
             cherrypy.request.path_info.endswith('/git-receive-pack')):
+
+        valid_users = {}
+        accessible = False
+        for user, account_info in accounts.items():
+            for project in account_info['projects']:
+                if project == '*' or cherrypy.request.path_info.startswith(project):
+                    accessible = True
+                    break
+            if accessible:
+                valid_users[user] = account_info['password']
+            accessible = False
+
+        get_ha1 = get_ha1_dict_plain(valid_users)
         digest_auth('Git Access', get_ha1, '5d41402abc4b2a76b9719d911017c592')
 
 
