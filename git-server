@@ -139,11 +139,13 @@ if __name__ == '__main__':
         },
     }
 
-    Daemonizer(cherrypy.engine).subscribe()
-    PIDFile(cherrypy.engine, PID_FILE_PATH).subscribe()
-
     cherrypy.config.update(server_conf)
     cherrypy.tree.mount(None, '/', static_contents_conf)
     cherrypy.tree.mount(Git(), '/git')
+
+    Daemonizer(cherrypy.engine).subscribe()
+    PIDFile(cherrypy.engine, PID_FILE_PATH).subscribe()
+    cherrypy.engine.signals.subscribe()
+
     cherrypy.engine.start()
     cherrypy.engine.block()
